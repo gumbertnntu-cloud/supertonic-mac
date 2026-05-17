@@ -19,6 +19,7 @@ enum Config {
 
     static var sileroScript: String { "\(appRoot)/py/silero_synth.py" }
     static var f5Script: String { "\(appRoot)/py/f5_synth.py" }
+    static var asrScript: String { "\(appRoot)/py/asr_gigaam.py" }
 
     static var voiceSamplesDir: String { "\(appRoot)/voice_samples" }
     static var voiceSamplesIndex: String { "\(voiceSamplesDir)/index.json" }
@@ -217,6 +218,55 @@ enum SynthesisError: Error, LocalizedError {
             return "Не найден Python venv по пути \(Config.pythonBin). Запустите `uv sync` в \(Config.pyWorkDir)."
         case .scriptFailed(let s): return "Ошибка синтеза: \(s)"
         case .noOutput: return "Скрипт отработал, но WAV не появился."
+        }
+    }
+}
+
+// MARK: - ASR (GigaAM v3 MLX)
+
+enum ASRError: Error, LocalizedError {
+    case pythonMissing
+    case failed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .pythonMissing: return "Не найден Python venv (\(Config.pythonBin))."
+        case .failed(let s): return "ASR ошибка: \(s)"
+        }
+    }
+}
+
+struct ASR {
+    static func transcribe(audio: URL) async throws -> String {
+        guard FileManager.default.fileExists(atPath: Config.pythonBin) else {
+            throw ASRError.pythonMissing
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: Config.pythonBin)
+        proc.currentDirectoryURL = URL(fileURLWithPath: Config.pyWorkDir)
+        proc.arguments = [Config.asrScript, audio.path]
+
+        let stdout = Pipe()
+        let stderr = Pipe()
+        proc.standardOutput = stdout
+        proc.standardError = stderr
+
+        try proc.run()
+
+        return try await withCheckedThrowingContinuation { cont in
+            proc.terminationHandler = { p in
+                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+                if p.terminationStatus != 0 {
+                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let msg = (String(data: errData, encoding: .utf8) ?? "")
+                        + (String(data: outData, encoding: .utf8) ?? "")
+                    cont.resume(throwing: ASRError.failed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    return
+                }
+                let text = String(data: outData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                cont.resume(returning: text)
+            }
         }
     }
 }
@@ -780,6 +830,7 @@ struct AddSampleSheet: View {
     @State private var sourceURL: URL?
     @State private var refText: String = ""
     @State private var errorMessage: String = ""
+    @State private var isRecognizing: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -805,8 +856,25 @@ struct AddSampleSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Что говорится в этом файле — транскрипция")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack {
+                    Text("Что говорится в этом файле — транскрипция")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button(action: { recognize() }) {
+                        HStack(spacing: 4) {
+                            if isRecognizing {
+                                ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+                            } else {
+                                Image(systemName: "waveform.badge.magnifyingglass")
+                            }
+                            Text(isRecognizing ? "Распознаю…" : "Распознать (GigaAM)")
+                                .font(.system(size: 11))
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(sourceURL == nil || isRecognizing)
+                    .help("Распознать речь через локальный GigaAM v3 (MLX). Работает офлайн.")
+                }
                 TextEditor(text: $refText)
                     .font(.system(size: 13))
                     .frame(minHeight: 80)
@@ -845,6 +913,26 @@ struct AddSampleSheet: View {
             sourceURL = url
             if displayName.isEmpty {
                 displayName = url.deletingPathExtension().lastPathComponent
+            }
+        }
+    }
+
+    private func recognize() {
+        guard let url = sourceURL, !isRecognizing else { return }
+        isRecognizing = true
+        errorMessage = ""
+        Task {
+            do {
+                let text = try await ASR.transcribe(audio: url)
+                await MainActor.run {
+                    refText = text
+                    isRecognizing = false
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    isRecognizing = false
+                }
             }
         }
     }

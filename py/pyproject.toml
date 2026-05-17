@@ -14,12 +14,14 @@ dependencies = [
     "torchaudio>=2.4",
     "f5-tts",
     "f5-tts-mlx",
+    "gigaam-mlx",
 ]
 
 [tool.uv.sources]
 # CPU-only torch wheels (no CUDA) for smaller install on Apple Silicon
 torch = { index = "pytorch-cpu" }
 torchaudio = { index = "pytorch-cpu" }
+gigaam-mlx = { git = "https://github.com/aystream/gigaam-mlx.git" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
