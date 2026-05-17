@@ -20,6 +20,7 @@ enum Config {
     static var sileroScript: String { "\(appRoot)/py/silero_synth.py" }
     static var f5Script: String { "\(appRoot)/py/f5_synth.py" }
     static var asrScript: String { "\(appRoot)/py/asr_gigaam.py" }
+    static var workerScript: String { "\(appRoot)/py/tts_worker.py" }
 
     static var voiceSamplesDir: String { "\(appRoot)/voice_samples" }
     static var voiceSamplesIndex: String { "\(voiceSamplesDir)/index.json" }
@@ -222,6 +223,116 @@ enum SynthesisError: Error, LocalizedError {
     }
 }
 
+// MARK: - Persistent Python worker
+
+enum WorkerError: Error, LocalizedError {
+    case pythonMissing
+    case workerDied(String)
+    case badResponse(String)
+    case remote(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .pythonMissing: return "Не найден Python venv (\(Config.pythonBin))."
+        case .workerDied(let s): return "Python worker умер: \(s)"
+        case .badResponse(let s): return "Неверный ответ worker'а: \(s)"
+        case .remote(let s): return s
+        }
+    }
+}
+
+/// Long-lived Python process shared by all engines.
+/// Single instance, serial command queue (actor ensures one-at-a-time).
+actor WorkerEngine {
+    static let shared = WorkerEngine()
+
+    private var process: Process?
+    private var stdin: FileHandle?
+    private var stdout: FileHandle?
+    private var readBuffer = Data()
+
+    private func ensureRunning() async throws {
+        if let p = process, p.isRunning { return }
+        guard FileManager.default.fileExists(atPath: Config.pythonBin) else {
+            throw WorkerError.pythonMissing
+        }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: Config.pythonBin)
+        proc.currentDirectoryURL = URL(fileURLWithPath: Config.pyWorkDir)
+        proc.arguments = [Config.workerScript]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        proc.standardInput = stdinPipe
+        proc.standardOutput = stdoutPipe
+        proc.standardError = stderrPipe
+
+        // Drain stderr so the pipe never fills and stalls Python.
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            _ = handle.availableData
+        }
+
+        try proc.run()
+        process = proc
+        stdin = stdinPipe.fileHandleForWriting
+        stdout = stdoutPipe.fileHandleForReading
+        readBuffer = Data()
+
+        // Wait for {"ready": true}
+        let ready = try await readLineFromStdout(timeoutSeconds: 30)
+        guard ready.contains("\"ready\"") else {
+            throw WorkerError.workerDied("first line was '\(ready)' instead of ready signal")
+        }
+    }
+
+    private func readLineFromStdout(timeoutSeconds: TimeInterval) async throws -> String {
+        guard let out = stdout else { throw WorkerError.workerDied("no stdout") }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let newline = UInt8(0x0A)
+        while true {
+            if let i = readBuffer.firstIndex(of: newline) {
+                let lineData = readBuffer.subdata(in: 0..<i)
+                readBuffer.removeSubrange(0...i)
+                return String(data: lineData, encoding: .utf8) ?? ""
+            }
+            let chunk = out.availableData
+            if chunk.isEmpty {
+                if let p = process, !p.isRunning {
+                    throw WorkerError.workerDied("exit code \(p.terminationStatus)")
+                }
+                if Date() > deadline {
+                    throw WorkerError.workerDied("readline timeout after \(Int(timeoutSeconds))s")
+                }
+                // Brief sleep to avoid busy loop. availableData is non-blocking.
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                continue
+            }
+            readBuffer.append(chunk)
+        }
+    }
+
+    /// Send a request, await one JSON response. Big synthesis calls get long timeouts.
+    func send(_ payload: [String: Any], timeoutSeconds: TimeInterval = 600) async throws -> [String: Any] {
+        try await ensureRunning()
+        guard let inHandle = stdin else { throw WorkerError.workerDied("no stdin") }
+
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        inHandle.write(data)
+        inHandle.write(Data([0x0A]))
+
+        let line = try await readLineFromStdout(timeoutSeconds: timeoutSeconds)
+        guard let bytes = line.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
+            throw WorkerError.badResponse(line)
+        }
+        if let ok = obj["ok"] as? Bool, ok == false {
+            throw WorkerError.remote(obj["error"] as? String ?? "unknown error")
+        }
+        return obj
+    }
+}
+
 // MARK: - ASR (GigaAM v3 MLX)
 
 enum ASRError: Error, LocalizedError {
@@ -238,115 +349,67 @@ enum ASRError: Error, LocalizedError {
 
 struct ASR {
     static func transcribe(audio: URL) async throws -> String {
-        guard FileManager.default.fileExists(atPath: Config.pythonBin) else {
-            throw ASRError.pythonMissing
-        }
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: Config.pythonBin)
-        proc.currentDirectoryURL = URL(fileURLWithPath: Config.pyWorkDir)
-        proc.arguments = [Config.asrScript, audio.path]
-
-        let stdout = Pipe()
-        let stderr = Pipe()
-        proc.standardOutput = stdout
-        proc.standardError = stderr
-
-        try proc.run()
-
-        return try await withCheckedThrowingContinuation { cont in
-            proc.terminationHandler = { p in
-                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                if p.terminationStatus != 0 {
-                    let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let msg = (String(data: errData, encoding: .utf8) ?? "")
-                        + (String(data: outData, encoding: .utf8) ?? "")
-                    cont.resume(throwing: ASRError.failed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    return
-                }
-                let text = String(data: outData, encoding: .utf8)?
-                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                cont.resume(returning: text)
-            }
+        do {
+            let resp = try await WorkerEngine.shared.send(
+                ["action": "asr_gigaam", "audio": audio.path],
+                timeoutSeconds: 60
+            )
+            return (resp["text"] as? String) ?? ""
+        } catch let WorkerError.remote(msg) {
+            throw ASRError.failed(msg)
         }
     }
 }
 
 struct Synthesizer {
     static func synthesize(text: String, voice: String, engine: Engine, sample: VoiceSample? = nil) async throws -> URL {
-        guard FileManager.default.fileExists(atPath: Config.pythonBin) else {
-            throw SynthesisError.pythonMissing
-        }
-
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("supertonic-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+        let outFile = tmpDir.appendingPathComponent("out.wav")
 
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: Config.pythonBin)
-
+        var payload: [String: Any]
         switch engine {
         case .silero:
-            proc.currentDirectoryURL = URL(fileURLWithPath: Config.pyWorkDir)
-            let outFile = tmpDir.appendingPathComponent("out.wav")
-            proc.arguments = [
-                Config.sileroScript,
-                "--text", text,
-                "--speaker", voice,
-                "--save-file", outFile.path,
+            payload = [
+                "action": "synthesize_silero",
+                "voice": voice,
+                "text": text,
+                "out": outFile.path,
             ]
         case .f5:
-            proc.currentDirectoryURL = URL(fileURLWithPath: Config.pyWorkDir)
             guard let sample else {
                 throw SynthesisError.scriptFailed("F5: не выбран голосовой образец")
             }
-            let outFile = tmpDir.appendingPathComponent("out.wav")
-            proc.arguments = [
-                Config.f5Script,
-                "--text", text,
-                "--ref-audio", sample.audioPath,
-                "--ref-text", sample.refText,
-                "--save-file", outFile.path,
+            payload = [
+                "action": "synthesize_f5",
+                "text": text,
+                "ref_audio": sample.audioPath,
+                "ref_text": sample.refText,
+                "out": outFile.path,
+                "backend": "auto",
             ]
         case .supertonic, .auto:
-            proc.currentDirectoryURL = URL(fileURLWithPath: Config.supertonicWorkDir)
-            let voiceStyle = "\(Config.voiceStylesDir)/\(voice).json"
-            proc.arguments = [
-                Config.supertonicScript,
-                "--n-test", "1",
-                "--lang", "na",
-                "--text", text,
-                "--voice-style", voiceStyle,
-                "--save-dir", tmpDir.path,
+            payload = [
+                "action": "synthesize_supertonic",
+                "voice": voice,
+                "text": text,
+                "out": outFile.path,
             ]
         }
 
-        let stderrPipe = Pipe()
-        let stdoutPipe = Pipe()
-        proc.standardError = stderrPipe
-        proc.standardOutput = stdoutPipe
-
-        try proc.run()
-
-        return try await withCheckedThrowingContinuation { cont in
-            proc.terminationHandler = { p in
-                if p.terminationStatus != 0 {
-                    let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                    let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                    let msg = (String(data: errData, encoding: .utf8) ?? "")
-                        + (String(data: outData, encoding: .utf8) ?? "")
-                    cont.resume(throwing: SynthesisError.scriptFailed(msg.trimmingCharacters(in: .whitespacesAndNewlines)))
-                    return
-                }
-
-                let wavs = (try? FileManager.default.contentsOfDirectory(at: tmpDir, includingPropertiesForKeys: nil))?
-                    .filter { $0.pathExtension.lowercased() == "wav" } ?? []
-                guard let wav = wavs.first else {
-                    cont.resume(throwing: SynthesisError.noOutput)
-                    return
-                }
-                cont.resume(returning: wav)
-            }
+        do {
+            _ = try await WorkerEngine.shared.send(payload, timeoutSeconds: 600)
+        } catch let WorkerError.remote(msg) {
+            throw SynthesisError.scriptFailed(msg)
+        } catch WorkerError.pythonMissing {
+            throw SynthesisError.pythonMissing
         }
+
+        guard FileManager.default.fileExists(atPath: outFile.path) else {
+            throw SynthesisError.noOutput
+        }
+        return outFile
     }
 }
 
