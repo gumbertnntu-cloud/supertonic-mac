@@ -649,20 +649,38 @@ struct ContentView: View {
                 Spacer()
             }
 
-            TextEditor(text: $model.text)
-                .font(.system(size: 14))
-                .focused($textFocused)
-                .frame(minHeight: 180)
-                .padding(8)
-                .background(Color(NSColor.textBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color(NSColor.separatorColor), lineWidth: 1)
-                )
-                .onChange(of: model.text) { _, _ in
-                    model.invalidateCache()
-                    model.ensureVoiceValid()
+            ZStack(alignment: .topTrailing) {
+                TextEditor(text: $model.text)
+                    .font(.system(size: 14))
+                    .focused($textFocused)
+                    .frame(minHeight: 180)
+                    .padding(8)
+                    .background(Color(NSColor.textBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(NSColor.separatorColor), lineWidth: 1)
+                    )
+                    .onChange(of: model.text) { _, _ in
+                        model.invalidateCache()
+                        model.ensureVoiceValid()
+                    }
+
+                if model.effectiveEngine == .f5 && samplesStore.samples.isEmpty {
+                    Button(action: { showSamples = true }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "info.circle.fill")
+                            Text("Для F5 нужен голосовой образец — добавь")
+                                .font(.system(size: 12))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.accentColor.opacity(0.2))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(12)
                 }
+            }
 
             HStack(spacing: 12) {
                 Text("Движок:")
@@ -675,9 +693,12 @@ struct ContentView: View {
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .frame(width: 130)
-                .onChange(of: model.engine) { _, _ in
+                .onChange(of: model.engine) { _, newEngine in
                     model.invalidateCache()
                     model.ensureVoiceValid()
+                    if newEngine == .f5 && samplesStore.samples.isEmpty {
+                        showSamples = true
+                    }
                 }
 
                 Text("Голос:")
@@ -700,11 +721,15 @@ struct ContentView: View {
                 }
 
                 Button(action: { showSamples = true }) {
-                    Image(systemName: "person.crop.square.badge.plus")
-                        .font(.system(size: 14))
+                    HStack(spacing: 4) {
+                        Image(systemName: "person.crop.square.badge.plus")
+                        Text(samplesStore.samples.isEmpty
+                             ? "Образцы"
+                             : "Образцы (\(samplesStore.samples.count))")
+                            .font(.system(size: 12))
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Управление голосовыми образцами (для F5)")
+                .help("Управление голосовыми образцами для F5 cloning")
 
                 Spacer()
 
