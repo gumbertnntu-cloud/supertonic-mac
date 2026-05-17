@@ -6,8 +6,9 @@
 |---|---|---|---|
 | **Supertonic 3** | Английский + 30 языков, фиксированные голоса M1–F5 | RTF ~0.3× | Apache 2.0 |
 | **Silero v4 (RU)** | Чистый русский, автоматические ударения, SSML | RTF ~0.1× | non-commercial |
-| **F5-TTS (MLX)** | Voice cloning, EN/ZH база, native Apple Silicon | RTF ~2–3× | CC-BY-NC |
-| **F5-TTS (torch)** | Voice cloning, fallback на CPU для русского | RTF ~5–20× | CC-BY-NC |
+| **F5-TTS (MLX, EN/ZH)** | Voice cloning, base lucasnewman/f5-tts-mlx | RTF ~2–3× | CC-BY-NC |
+| **F5-TTS (MLX, RU)** | Voice cloning, Misha24-10/F5-TTS_RUSSIAN finetune | RTF ~3–4× | CC-BY-NC |
+| **F5-TTS (torch, RU)** | Fallback если MLX-RU не установлен | RTF ~15× | CC-BY-NC |
 
 `Auto`-режим переключает между Supertonic и Silero по доле кириллицы в тексте; F5 включается явно.
 
@@ -29,6 +30,17 @@ uv sync --python 3.12
 ```
 
 Это поставит `onnxruntime`, `torch` (CPU-only), `f5-tts`, `omegaconf` и др. в локальный venv `~/projects/supertonic-mac/py/.venv/`.
+
+### 2b. (опционально) Включить MLX-RU для F5
+
+Если хочешь, чтобы клонирование голоса на русском работало быстро (RTF ~3–4× вместо ~15× через torch):
+
+```bash
+cd ~/projects/supertonic-mac/py
+uv run setup_ru_mlx.py
+```
+
+Это скачает Misha24-10/F5-TTS_RUSSIAN (~1.3 ГБ) и положит файлы в `~/.cache/local-f5-misha-ru/` под именами, которые понимает `f5_tts_mlx`. После этого worker сам видит установку и роутит F5 для кириллицы через MLX.
 
 ### 3. Клонировать upstream Supertonic (для весов и `example_onnx.py`)
 

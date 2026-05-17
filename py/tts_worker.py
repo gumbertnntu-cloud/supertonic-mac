@@ -169,14 +169,39 @@ def do_supertonic(req):
 
 # ----- F5 -----
 
+RU_MLX_DIR = os.path.expanduser("~/.cache/local-f5-misha-ru")
+
+
 def _resolve_f5_backend(selected, text):
     if selected and selected != "auto":
         return selected
     letters = [c for c in text if c.isalpha()]
     if not letters:
-        return "mlx"
+        return "mlx-en"
     cyr = sum(1 for c in letters if "Ѐ" <= c <= "ӿ")
-    return "torch" if (cyr / len(letters)) > 0.3 else "mlx"
+    if (cyr / len(letters)) > 0.3:
+        # Prefer the MLX Russian finetune if it's been staged; fall back to
+        # the torch RU model otherwise. mlx-ru is ~5x faster than torch on M4 Pro.
+        return "mlx-ru" if os.path.isdir(RU_MLX_DIR) else "torch"
+    return "mlx-en"
+
+
+def _patch_fetch_from_hub_once():
+    """Make f5_tts_mlx accept local directory paths in addition to HF repo ids."""
+    import f5_tts_mlx.utils as utils_mod
+    import f5_tts_mlx.cfm as cfm_mod
+    if getattr(utils_mod, "_supertonic_patched", False):
+        return
+    _orig = utils_mod.fetch_from_hub
+    from pathlib import Path
+
+    def patched(repo, quantization_bits=None):
+        p = Path(repo).expanduser()
+        return p if p.is_dir() else _orig(repo, quantization_bits=quantization_bits)
+
+    utils_mod.fetch_from_hub = patched
+    cfm_mod.fetch_from_hub = patched
+    utils_mod._supertonic_patched = True
 
 
 def _ensure_f5_torch():
@@ -213,7 +238,7 @@ def do_f5(req):
     out = req["out"]
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
 
-    if backend == "mlx":
+    if backend in ("mlx", "mlx-en", "mlx-ru"):
         # f5_tts_mlx requires 24kHz reference
         import soundfile as sf
         info = sf.info(req["ref_audio"])
@@ -226,22 +251,37 @@ def do_f5(req):
             ref_path = f"{base}_24k.wav"
             if not os.path.exists(ref_path):
                 sf.write(ref_path, y, 24000, subtype="PCM_16")
+
+        # Russian local model lacks a compatible duration_predictor, so we
+        # supply an explicit duration based on char-length ratio. EN/ZH base
+        # model has duration_v2.safetensors and uses estimate_duration=True.
+        use_ru = backend == "mlx-ru" and os.path.isdir(RU_MLX_DIR)
+        model_name = RU_MLX_DIR if use_ru else "lucasnewman/f5-tts-mlx"
+
+        gen_kwargs = dict(
+            generation_text=req["text"],
+            ref_audio_path=ref_path,
+            ref_audio_text=req["ref_text"],
+            output_path=out,
+            steps=int(req.get("steps", 8)),
+            model_name=model_name,
+        )
+        if use_ru:
+            ref_dur = sf.info(ref_path).frames / sf.info(ref_path).samplerate
+            gen_ratio = len(req["text"].strip()) / max(len(req["ref_text"].strip()), 1)
+            # ref + gen, +20% safety margin so we don't truncate
+            gen_kwargs["duration"] = ref_dur + ref_dur * gen_ratio * 1.2
+
         t = time.time()
         with _quiet():
-            # Import inside _quiet too — first import triggers vocoder lazy-loads
-            # that print to stdout via huggingface_hub.
+            _patch_fetch_from_hub_once()
             from f5_tts_mlx.generate import generate
-            generate(
-                generation_text=req["text"],
-                ref_audio_path=ref_path,
-                ref_audio_text=req["ref_text"],
-                output_path=out,
-                steps=int(req.get("steps", 8)),
-            )
+            generate(**gen_kwargs)
         synth = time.time() - t
         dur_info = sf.info(out)
         dur = dur_info.frames / dur_info.samplerate
-        return {"ok": True, "engine": "f5/mlx", "out": out, "duration": dur, "rtf": synth / max(dur, 1e-6)}
+        engine_id = "f5/mlx-ru" if use_ru else "f5/mlx-en"
+        return {"ok": True, "engine": engine_id, "out": out, "duration": dur, "rtf": synth / max(dur, 1e-6)}
 
     # torch backend
     f5 = _ensure_f5_torch()

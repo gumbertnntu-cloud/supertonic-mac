@@ -521,7 +521,7 @@ final class AppModel: ObservableObject {
                 return
             }
             if eng == .f5 && cyrillicShare(trimmed) > 0.3 {
-                status = "F5 RU: ~60с на 5с фразы (CPU). Подожди…"
+                status = "F5 RU (MLX): генерация… (RTF ~3–4×)"
             } else {
                 status = "\(engLabel): генерация…"
             }
@@ -1137,11 +1137,11 @@ struct HelpView: View {
                     rows: [
                         ("образец", "Кнопка «Образцы» → Добавить → импортируй WAV/MP3/OGG 5–15 сек чёткой речи."),
                         ("транскрипция", "Кнопка «Распознать (GigaAM)» автоматически заполнит текст. Можно поправить."),
-                        ("первый запуск", "При первом Play скачается модель (~1.4 ГБ для EN/ZH MLX, ~1.3 ГБ для русского torch)."),
-                        ("EN/ZH текст", "→ MLX backend (lucasnewman/f5-tts-mlx), RTF ~2–3× на M4 Pro. Быстро."),
-                        ("Кириллица", "→ torch backend с русским finetune Misha24-10/F5-TTS_RUSSIAN. RTF ~15× (≈1 мин на 5 сек). Реально говорит по-русски."),
+                        ("первый запуск", "При первом Play скачается модель (~1.3 ГБ). Дальше — без сети."),
+                        ("EN/ZH текст", "→ MLX backend (lucasnewman/f5-tts-mlx), RTF ~2–3× на M4 Pro."),
+                        ("Кириллица", "→ MLX backend с русским finetune (Misha24-10/F5-TTS_RUSSIAN). RTF ~3–4×."),
                     ],
-                    footer: "Если для русского нужна скорость — отключи F5, бери Silero. Если нужен именно твой голос на русском — терпи минуту."
+                    footer: "Если MLX-RU не установлен — fallback на torch backend (~RTF 15×). Установить: `uv run setup_ru_mlx.py` в py/."
                 )
 
                 Text("Подсказка по горячим клавишам: ⌘↩ — Play / Стоп, ⌘E — экспорт WAV")
