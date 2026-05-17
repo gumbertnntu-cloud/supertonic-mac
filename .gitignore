@@ -1,0 +1,27 @@
+# Python
+py/.venv/
+py/__pycache__/
+**/__pycache__/
+*.pyc
+*.egg-info/
+
+# Build artifacts
+app/Supertonic.app/
+app/.build/
+app/build/
+
+# Voice samples (user data — not in git)
+voice_samples/*
+!voice_samples/.gitkeep
+
+# Generated / cached
+results/
+.cache/
+
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
