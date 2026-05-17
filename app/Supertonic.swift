@@ -279,10 +279,10 @@ actor WorkerEngine {
         stdout = stdoutPipe.fileHandleForReading
         readBuffer = Data()
 
-        // Wait for {"ready": true}
-        let ready = try await readLineFromStdout(timeoutSeconds: 30)
-        guard ready.contains("\"ready\"") else {
-            throw WorkerError.workerDied("first line was '\(ready)' instead of ready signal")
+        // Wait for {"ready": true} — skip any noise that may precede it.
+        let ready = try await readJSONLine(timeoutSeconds: 30)
+        guard (ready["ready"] as? Bool) == true else {
+            throw WorkerError.workerDied("first JSON line was \(ready) instead of ready signal")
         }
     }
 
@@ -312,6 +312,25 @@ actor WorkerEngine {
         }
     }
 
+    /// Skip lines until one parses as JSON. Defends against library output
+    /// that bypassed our FD-level silencing in the worker (shouldn't happen,
+    /// but cheap insurance).
+    private func readJSONLine(timeoutSeconds: TimeInterval) async throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            let line = try await readLineFromStdout(timeoutSeconds: max(1, deadline.timeIntervalSinceNow))
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            if let bytes = trimmed.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] {
+                return obj
+            }
+            // Not JSON — log via stderr and keep reading.
+            FileHandle.standardError.write(Data("[worker noise] \(trimmed)\n".utf8))
+        }
+        throw WorkerError.workerDied("no JSON response within \(Int(timeoutSeconds))s")
+    }
+
     /// Send a request, await one JSON response. Big synthesis calls get long timeouts.
     func send(_ payload: [String: Any], timeoutSeconds: TimeInterval = 600) async throws -> [String: Any] {
         try await ensureRunning()
@@ -321,11 +340,7 @@ actor WorkerEngine {
         inHandle.write(data)
         inHandle.write(Data([0x0A]))
 
-        let line = try await readLineFromStdout(timeoutSeconds: timeoutSeconds)
-        guard let bytes = line.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any] else {
-            throw WorkerError.badResponse(line)
-        }
+        let obj = try await readJSONLine(timeoutSeconds: timeoutSeconds)
         if let ok = obj["ok"] as? Bool, ok == false {
             throw WorkerError.remote(obj["error"] as? String ?? "unknown error")
         }
@@ -387,7 +402,11 @@ struct Synthesizer {
                 "ref_audio": sample.audioPath,
                 "ref_text": sample.refText,
                 "out": outFile.path,
-                "backend": "auto",
+                // Always pick MLX for speed. Trade-off: Russian text gets an
+                // English accent because the base MLX model is EN+ZH. A UI
+                // toggle to switch to torch backend (slower, RU-native) is
+                // tracked separately.
+                "backend": "mlx",
             ]
         case .supertonic, .auto:
             payload = [
