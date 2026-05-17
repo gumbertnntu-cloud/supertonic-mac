@@ -402,11 +402,10 @@ struct Synthesizer {
                 "ref_audio": sample.audioPath,
                 "ref_text": sample.refText,
                 "out": outFile.path,
-                // Always pick MLX for speed. Trade-off: Russian text gets an
-                // English accent because the base MLX model is EN+ZH. A UI
-                // toggle to switch to torch backend (slower, RU-native) is
-                // tracked separately.
-                "backend": "mlx",
+                // Smart routing: kириллица → torch backend (slow ~RTF 15×, but
+                // really speaks Russian; the MLX base model is EN+ZH only and
+                // produces gibberish for Cyrillic). Latin/other → mlx (fast).
+                "backend": "auto",
             ]
         case .supertonic, .auto:
             payload = [
@@ -521,7 +520,11 @@ final class AppModel: ObservableObject {
                 isGenerating = false
                 return
             }
-            status = "\(engLabel): генерация…"
+            if eng == .f5 && cyrillicShare(trimmed) > 0.3 {
+                status = "F5 RU: ~60с на 5с фразы (CPU). Подожди…"
+            } else {
+                status = "\(engLabel): генерация…"
+            }
             let url = try await Synthesizer.synthesize(text: trimmed, voice: voice, engine: eng, sample: currentSample())
             cachedWav = url
             cacheKey = key
@@ -1132,12 +1135,13 @@ struct HelpView: View {
                 section(
                     title: "F5 — голосовое клонирование",
                     rows: [
-                        ("образец", "Нажми иконку «человек+» рядом с picker голоса → импортируй WAV/MP3 5–15 сек чёткой речи без шума."),
-                        ("транскрипция", "Введи в точности, что произносится в файле. F5 использует это как образец произношения."),
-                        ("первый запуск", "F5 скачает ~1.4 ГБ модели при первом синтезе. Дальше — секунды на инициализацию."),
-                        ("backend (auto)", "EN/ZH текст → MLX (native Apple Silicon, RTF ~2–3×). Кириллица → torch (медленнее RTF ~10×, но русский произносит без акцента)."),
+                        ("образец", "Кнопка «Образцы» → Добавить → импортируй WAV/MP3/OGG 5–15 сек чёткой речи."),
+                        ("транскрипция", "Кнопка «Распознать (GigaAM)» автоматически заполнит текст. Можно поправить."),
+                        ("первый запуск", "При первом Play скачается модель (~1.4 ГБ для EN/ZH MLX, ~1.3 ГБ для русского torch)."),
+                        ("EN/ZH текст", "→ MLX backend (lucasnewman/f5-tts-mlx), RTF ~2–3× на M4 Pro. Быстро."),
+                        ("Кириллица", "→ torch backend с русским finetune Misha24-10/F5-TTS_RUSSIAN. RTF ~15× (≈1 мин на 5 сек). Реально говорит по-русски."),
                     ],
-                    footer: "Лицензия модели F5-TTS — CC-BY-NC (некоммерческая). Для личного использования ок."
+                    footer: "Если для русского нужна скорость — отключи F5, бери Silero. Если нужен именно твой голос на русском — терпи минуту."
                 )
 
                 Text("Подсказка по горячим клавишам: ⌘↩ — Play / Стоп, ⌘E — экспорт WAV")

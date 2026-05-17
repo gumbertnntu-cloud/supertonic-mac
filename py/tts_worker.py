@@ -180,12 +180,31 @@ def _resolve_f5_backend(selected, text):
 
 
 def _ensure_f5_torch():
+    """Load F5-TTS torch backend with the Russian finetune
+    (Misha24-10/F5-TTS_RUSSIAN). The base lucasnewman/f5-tts-mlx model is
+    English+Chinese only and produces gibberish for Cyrillic; this finetune
+    actually speaks Russian. Same arch (F5TTS v1 base), just different weights."""
     global _f5_torch
     if _f5_torch is not None:
         return _f5_torch
     with _quiet():
+        from huggingface_hub import hf_hub_download
         from f5_tts.api import F5TTS
-        _f5_torch = F5TTS(model="F5TTS_v1_Base", device="cpu")
+
+        ckpt = hf_hub_download(
+            repo_id="Misha24-10/F5-TTS_RUSSIAN",
+            filename="F5TTS_v1_Base_v2/model_last_inference.safetensors",
+        )
+        vocab = hf_hub_download(
+            repo_id="Misha24-10/F5-TTS_RUSSIAN",
+            filename="F5TTS_v1_Base/vocab.txt",
+        )
+        _f5_torch = F5TTS(
+            model="F5TTS_v1_Base",
+            ckpt_file=ckpt,
+            vocab_file=vocab,
+            device="cpu",
+        )
     return _f5_torch
 
 
