@@ -6,7 +6,8 @@
 |---|---|---|---|
 | **Supertonic 3** | Английский + 30 языков, фиксированные голоса M1–F5 | RTF ~0.3× | Apache 2.0 |
 | **Silero v4 (RU)** | Чистый русский, автоматические ударения, SSML | RTF ~0.1× | non-commercial |
-| **F5-TTS** | Voice cloning из 5–15 сек образца, любой язык | RTF ~5–20× на CPU | CC-BY-NC |
+| **F5-TTS (MLX)** | Voice cloning, EN/ZH база, native Apple Silicon | RTF ~2–3× | CC-BY-NC |
+| **F5-TTS (torch)** | Voice cloning, fallback на CPU для русского | RTF ~5–20× | CC-BY-NC |
 
 `Auto`-режим переключает между Supertonic и Silero по доле кириллицы в тексте; F5 включается явно.
 
@@ -96,6 +97,6 @@ supertonic-mac/
 ## Подводные камни
 
 - **Python 3.13/3.14**: `onnxruntime 1.23.1` не имеет wheel'ов; используем 3.12.
-- **F5 на CPU медленный**: RTF ~5–20× (минута на 3 сек). MPS должен помочь, но пока не настроен.
+- **F5 на CPU медленный**: torch backend даёт RTF ~5–20× (минута на 3 сек). MLX backend в ~7 раз быстрее (RTF ~2–3×), но базовая MLX-модель обучена на EN+ZH — русский звучит с английским акцентом. По умолчанию `f5_synth.py --backend auto` выбирает MLX для не-кириллицы, torch для кириллицы.
 - **Холодный старт**: каждый клик Play поднимает новый Python-процесс. На Silero +~2 сек, на F5 +~5–10 сек. Persistent worker — отдельная задача.
 - **Лицензии моделей**: Silero — non-commercial, F5 — CC-BY-NC. Supertonic — Apache 2.0, без ограничений.

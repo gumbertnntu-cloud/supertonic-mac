@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.4",
     "torchaudio>=2.4",
     "f5-tts",
+    "f5-tts-mlx",
 ]
 
 [tool.uv.sources]
