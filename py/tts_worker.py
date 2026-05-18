@@ -45,6 +45,7 @@ _silero_model = None
 _supertonic_pipeline = None
 _f5_torch = None
 _gigaam = None
+_xtts = None
 
 
 # Save a copy of the real stdout FD at startup — BEFORE anything has a chance
@@ -299,6 +300,64 @@ def do_f5(req):
     return {"ok": True, "engine": "f5/torch", "out": out, "duration": dur, "rtf": synth / max(dur, 1e-6)}
 
 
+# ----- XTTS-v2 (Coqui) -----
+
+def _ensure_xtts():
+    """Load Coqui XTTS-v2 (multilingual voice cloning, 17 langs incl. Russian).
+
+    First call downloads ~1.8 GB to ~/Library/Application Support/tts/ via the
+    coqui-tts model manager. Subsequent worker sessions reuse the cache."""
+    global _xtts
+    if _xtts is not None:
+        return _xtts
+    # coqui-tts ships code that imports a transformers symbol removed in v5.
+    # Restore it as an alias before TTS is imported.
+    import torch
+    import transformers.pytorch_utils as tpu
+    if not hasattr(tpu, "isin_mps_friendly"):
+        tpu.isin_mps_friendly = torch.isin
+    os.environ.setdefault("COQUI_TOS_AGREED", "1")
+    with _quiet():
+        from TTS.api import TTS
+        _xtts = TTS("tts_models/multilingual/multi-dataset/xtts_v2", progress_bar=False).to("cpu")
+    return _xtts
+
+
+def _detect_xtts_language(text):
+    """XTTS expects an ISO-ish language code. We support a useful subset; pick by
+    script + simple Latin defaults. User can override via req['language']."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return "en"
+    cyr = sum(1 for c in letters if "Ѐ" <= c <= "ӿ")
+    if cyr / len(letters) > 0.3:
+        return "ru"
+    return "en"
+
+
+def do_xtts(req):
+    text = req["text"]
+    lang = req.get("language") or _detect_xtts_language(text)
+    out = req["out"]
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
+
+    tts = _ensure_xtts()
+    t = time.time()
+    with _quiet():
+        tts.tts_to_file(
+            text=text,
+            speaker_wav=req["ref_audio"],
+            language=lang,
+            file_path=out,
+        )
+    synth = time.time() - t
+    import soundfile as sf
+    info = sf.info(out)
+    dur = info.frames / info.samplerate
+    return {"ok": True, "engine": "xtts", "out": out, "duration": dur,
+            "rtf": synth / max(dur, 1e-6), "language": lang}
+
+
 # ----- ASR (GigaAM) -----
 
 def _ensure_gigaam():
@@ -326,6 +385,7 @@ HANDLERS = {
     "synthesize_supertonic": do_supertonic,
     "synthesize_silero": do_silero,
     "synthesize_f5": do_f5,
+    "synthesize_xtts": do_xtts,
     "asr_gigaam": do_asr,
 }
 

@@ -15,6 +15,7 @@ dependencies = [
     "f5-tts",
     "f5-tts-mlx",
     "gigaam-mlx",
+    "coqui-tts",
 ]
 
 [tool.uv.sources]

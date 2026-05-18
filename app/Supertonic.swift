@@ -154,6 +154,7 @@ enum Engine: String, CaseIterable, Identifiable {
     case supertonic
     case silero
     case f5
+    case xtts
 
     var id: String { rawValue }
 
@@ -163,6 +164,7 @@ enum Engine: String, CaseIterable, Identifiable {
         case .supertonic: return "Supertonic"
         case .silero: return "Silero (RU)"
         case .f5: return "F5 (clone)"
+        case .xtts: return "XTTS (clone, RU)"
         }
     }
 
@@ -170,17 +172,25 @@ enum Engine: String, CaseIterable, Identifiable {
         switch self {
         case .supertonic, .auto: return "M1"
         case .silero: return "aidar"
-        case .f5: return ""
+        case .f5, .xtts: return ""
         }
     }
 
-    /// Голоса для пресетных движков. Для .f5 список голосов формируется из VoiceSamplesStore отдельно.
+    /// True for engines that need a user voice sample (cloning).
+    var needsSample: Bool {
+        switch self {
+        case .f5, .xtts: return true
+        default: return false
+        }
+    }
+
+    /// Голоса для пресетных движков. Для .f5/.xtts список формируется из VoiceSamplesStore отдельно.
     func presetVoices() -> [String] {
         switch self {
         case .supertonic: return Config.supertonicVoices
         case .silero: return Config.sileroVoices
         case .auto: return Config.supertonicVoices + Config.sileroVoices
-        case .f5: return []
+        case .f5, .xtts: return []
         }
     }
 }
@@ -407,6 +417,16 @@ struct Synthesizer {
                 // produces gibberish for Cyrillic). Latin/other → mlx (fast).
                 "backend": "auto",
             ]
+        case .xtts:
+            guard let sample else {
+                throw SynthesisError.scriptFailed("XTTS: не выбран голосовой образец")
+            }
+            payload = [
+                "action": "synthesize_xtts",
+                "text": text,
+                "ref_audio": sample.audioPath,
+                "out": outFile.path,
+            ]
         case .supertonic, .auto:
             payload = [
                 "action": "synthesize_supertonic",
@@ -456,7 +476,7 @@ final class AppModel: ObservableObject {
     var effectiveEngine: Engine { resolveEngine(selected: engine, text: text) }
 
     var availableVoices: [String] {
-        if effectiveEngine == .f5 {
+        if effectiveEngine.needsSample {
             return samples.samples.map(\.id)
         }
         return effectiveEngine.presetVoices()
@@ -475,7 +495,7 @@ final class AppModel: ObservableObject {
     private func currentKey() -> String { "\(effectiveEngine.rawValue)::\(voice)::\(text)" }
 
     private func currentSample() -> VoiceSample? {
-        guard effectiveEngine == .f5 else { return nil }
+        guard effectiveEngine.needsSample else { return nil }
         return samples.sample(byId: voice)
     }
 
@@ -483,6 +503,7 @@ final class AppModel: ObservableObject {
         switch e {
         case .silero: return "Silero"
         case .f5: return "F5"
+        case .xtts: return "XTTS"
         case .supertonic, .auto: return "Supertonic"
         }
     }
@@ -515,13 +536,15 @@ final class AppModel: ObservableObject {
             }
             let eng = effectiveEngine
             let engLabel = engineLabel(eng)
-            if eng == .f5 && currentSample() == nil {
+            if eng.needsSample && currentSample() == nil {
                 status = "Загрузите хотя бы один образец голоса"
                 isGenerating = false
                 return
             }
             if eng == .f5 && cyrillicShare(trimmed) > 0.3 {
                 status = "F5 RU (MLX): генерация… (RTF ~3–4×)"
+            } else if eng == .xtts {
+                status = "XTTS: генерация… (RTF ~1.5×)"
             } else {
                 status = "\(engLabel): генерация…"
             }
@@ -687,11 +710,11 @@ struct ContentView: View {
                         model.ensureVoiceValid()
                     }
 
-                if model.effectiveEngine == .f5 && samplesStore.samples.isEmpty {
+                if model.effectiveEngine.needsSample && samplesStore.samples.isEmpty {
                     Button(action: { showSamples = true }) {
                         HStack(spacing: 6) {
                             Image(systemName: "info.circle.fill")
-                            Text("Для F5 нужен голосовой образец — добавь")
+                            Text("Для \(model.effectiveEngine.displayName) нужен голосовой образец — добавь")
                                 .font(.system(size: 12))
                         }
                         .padding(.horizontal, 10)
@@ -718,7 +741,7 @@ struct ContentView: View {
                 .onChange(of: model.engine) { _, newEngine in
                     model.invalidateCache()
                     model.ensureVoiceValid()
-                    if newEngine == .f5 && samplesStore.samples.isEmpty {
+                    if newEngine.needsSample && samplesStore.samples.isEmpty {
                         showSamples = true
                     }
                 }
@@ -1133,15 +1156,15 @@ struct HelpView: View {
                 )
 
                 section(
-                    title: "F5 — голосовое клонирование",
+                    title: "Voice cloning — два движка",
                     rows: [
+                        ("XTTS (clone, RU)", "Coqui XTTS-v2, 17 языков. Лучшее качество русского. RTF ~1.5×."),
+                        ("F5 (clone)", "F5-TTS. Отличный английский (RTF ~2–3× через MLX). Русский — слабее (Misha finetune, иностранный акцент)."),
                         ("образец", "Кнопка «Образцы» → Добавить → импортируй WAV/MP3/OGG 5–15 сек чёткой речи."),
-                        ("транскрипция", "Кнопка «Распознать (GigaAM)» автоматически заполнит текст. Можно поправить."),
-                        ("первый запуск", "При первом Play скачается модель (~1.3 ГБ). Дальше — без сети."),
-                        ("EN/ZH текст", "→ MLX backend (lucasnewman/f5-tts-mlx), RTF ~2–3× на M4 Pro."),
-                        ("Кириллица", "→ MLX backend с русским finetune (Misha24-10/F5-TTS_RUSSIAN). RTF ~3–4×."),
+                        ("транскрипция", "Для F5 — кнопка «Распознать (GigaAM)» заполнит автоматически. XTTS-у транскрипция не нужна."),
+                        ("первый запуск", "XTTS скачает ~1.8 ГБ, F5 — ~1.3 ГБ. Дальше — без сети."),
                     ],
-                    footer: "Если MLX-RU не установлен — fallback на torch backend (~RTF 15×). Установить: `uv run setup_ru_mlx.py` в py/."
+                    footer: "Для русского с клонированием — бери XTTS. Для английского с клонированием и скоростью — F5. Лицензии CC-BY-NC / CPML."
                 )
 
                 Text("Подсказка по горячим клавишам: ⌘↩ — Play / Стоп, ⌘E — экспорт WAV")
