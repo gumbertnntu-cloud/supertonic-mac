@@ -107,15 +107,21 @@ def do_silero(req):
     import soundfile as sf
     model = _ensure_silero()
     sr = 48000
+    speed = float(req.get("speed", 1.0))
+    text = req["text"]
+    # Silero supports speed via SSML <prosody rate>; wrap the whole utterance.
+    if abs(speed - 1.0) > 0.01:
+        # Map 0.5..1.5 to slow/medium/fast hints + percentage
+        pct = int(round(speed * 100))
+        text = f'<speak><prosody rate="{pct}%">{text}</prosody></speak>'
     t = time.time()
     with _quiet():
-        audio = model.apply_tts(
-            text=req["text"],
-            speaker=req.get("voice", "aidar"),
-            sample_rate=sr,
-            put_accent=True,
-            put_yo=True,
-        )
+        if text.startswith("<speak>"):
+            audio = model.apply_tts(ssml_text=text, speaker=req.get("voice", "aidar"),
+                                    sample_rate=sr, put_accent=True, put_yo=True)
+        else:
+            audio = model.apply_tts(text=text, speaker=req.get("voice", "aidar"),
+                                    sample_rate=sr, put_accent=True, put_yo=True)
     out_path = req["out"]
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
     sf.write(out_path, audio.cpu().numpy(), sr, subtype="PCM_16")
@@ -139,19 +145,17 @@ def do_supertonic(req):
     out_dir = os.path.dirname(os.path.abspath(req["out"])) or "."
     os.makedirs(out_dir, exist_ok=True)
     t = time.time()
-    res = subprocess.run(
-        [
-            sys.executable, script,
-            "--n-test", "1",
-            "--lang", "na",
-            "--text", req["text"],
-            "--voice-style", voice_style,
-            "--save-dir", out_dir,
-        ],
-        cwd=f"{upstream}/py",
-        capture_output=True,
-        text=True,
-    )
+    args = [
+        sys.executable, script,
+        "--n-test", "1",
+        "--lang", "na",
+        "--text", req["text"],
+        "--voice-style", voice_style,
+        "--save-dir", out_dir,
+        "--speed", str(float(req.get("speed", 1.05))),
+        "--total-step", str(int(req.get("total_step", 8))),
+    ]
+    res = subprocess.run(args, cwd=f"{upstream}/py", capture_output=True, text=True)
     if res.returncode != 0:
         return {"ok": False, "error": f"supertonic exited {res.returncode}: {res.stderr[-500:]}"}
     # Find the freshest WAV in out_dir and rename to req["out"]
@@ -265,6 +269,7 @@ def do_f5(req):
             ref_audio_text=req["ref_text"],
             output_path=out,
             steps=int(req.get("steps", 8)),
+            speed=float(req.get("speed", 1.0)),
             model_name=model_name,
         )
         if use_ru:
@@ -335,20 +340,47 @@ def _detect_xtts_language(text):
     return "en"
 
 
+def _ensure_wav_ref(path):
+    """XTTS's audio decoder (torchcodec) doesn't reliably handle OGG/MP3.
+    Materialize a 24kHz mono PCM16 WAV sibling if the source isn't WAV."""
+    import soundfile as sf
+    if path.lower().endswith(".wav"):
+        try:
+            info = sf.info(path)
+            if info.samplerate == 24000 and info.channels == 1:
+                return path
+        except Exception:
+            pass
+    import librosa
+    y, _ = librosa.load(path, sr=24000, mono=True)
+    base, _ext = os.path.splitext(path)
+    dst = f"{base}_xtts24k.wav"
+    if not os.path.exists(dst):
+        sf.write(dst, y, 24000, subtype="PCM_16")
+    return dst
+
+
 def do_xtts(req):
     text = req["text"]
     lang = req.get("language") or _detect_xtts_language(text)
     out = req["out"]
     os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
 
+    with _quiet():
+        ref_wav = _ensure_wav_ref(req["ref_audio"])
+
     tts = _ensure_xtts()
+    temperature = float(req.get("temperature", 0.65))
+    speed = float(req.get("speed", 1.0))
     t = time.time()
     with _quiet():
         tts.tts_to_file(
             text=text,
-            speaker_wav=req["ref_audio"],
+            speaker_wav=ref_wav,
             language=lang,
             file_path=out,
+            temperature=temperature,
+            speed=speed,
         )
     synth = time.time() - t
     import soundfile as sf

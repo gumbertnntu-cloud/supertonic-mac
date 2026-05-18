@@ -386,8 +386,16 @@ struct ASR {
     }
 }
 
+struct SynthParams {
+    var speed: Double = 1.0
+    var steps: Int = 8
+    var temperature: Double = 0.65
+}
+
 struct Synthesizer {
-    static func synthesize(text: String, voice: String, engine: Engine, sample: VoiceSample? = nil) async throws -> URL {
+    static func synthesize(text: String, voice: String, engine: Engine,
+                           sample: VoiceSample? = nil,
+                           params: SynthParams = SynthParams()) async throws -> URL {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("supertonic-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
@@ -401,6 +409,7 @@ struct Synthesizer {
                 "voice": voice,
                 "text": text,
                 "out": outFile.path,
+                "speed": params.speed,
             ]
         case .f5:
             guard let sample else {
@@ -412,10 +421,9 @@ struct Synthesizer {
                 "ref_audio": sample.audioPath,
                 "ref_text": sample.refText,
                 "out": outFile.path,
-                // Smart routing: kириллица → torch backend (slow ~RTF 15×, but
-                // really speaks Russian; the MLX base model is EN+ZH only and
-                // produces gibberish for Cyrillic). Latin/other → mlx (fast).
                 "backend": "auto",
+                "steps": params.steps,
+                "speed": params.speed,
             ]
         case .xtts:
             guard let sample else {
@@ -426,6 +434,8 @@ struct Synthesizer {
                 "text": text,
                 "ref_audio": sample.audioPath,
                 "out": outFile.path,
+                "temperature": params.temperature,
+                "speed": params.speed,
             ]
         case .supertonic, .auto:
             payload = [
@@ -433,6 +443,8 @@ struct Synthesizer {
                 "voice": voice,
                 "text": text,
                 "out": outFile.path,
+                "speed": params.speed,
+                "total_step": params.steps,
             ]
         }
 
@@ -461,6 +473,11 @@ final class AppModel: ObservableObject {
     @Published var status: String = ""
     @Published var isGenerating: Bool = false
     @Published var isPlaying: Bool = false
+
+    // Synthesis parameters
+    @Published var speed: Double = 1.0        // Supertonic / Silero / F5 / XTTS
+    @Published var steps: Int = 8             // Supertonic, F5 diffusion steps
+    @Published var temperature: Double = 0.65 // XTTS only
 
     let samples: VoiceSamplesStore
 
@@ -492,7 +509,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func currentKey() -> String { "\(effectiveEngine.rawValue)::\(voice)::\(text)" }
+    private func currentKey() -> String {
+        let p = String(format: "s%.2f-q%d-t%.2f", speed, steps, temperature)
+        return "\(effectiveEngine.rawValue)::\(voice)::\(p)::\(text)"
+    }
 
     private func currentSample() -> VoiceSample? {
         guard effectiveEngine.needsSample else { return nil }
@@ -548,7 +568,11 @@ final class AppModel: ObservableObject {
             } else {
                 status = "\(engLabel): генерация…"
             }
-            let url = try await Synthesizer.synthesize(text: trimmed, voice: voice, engine: eng, sample: currentSample())
+            let url = try await Synthesizer.synthesize(
+                text: trimmed, voice: voice, engine: eng,
+                sample: currentSample(),
+                params: SynthParams(speed: speed, steps: steps, temperature: temperature)
+            )
             cachedWav = url
             cacheKey = key
             let took = Date().timeIntervalSince(start)
@@ -595,7 +619,8 @@ final class AppModel: ObservableObject {
                     text: text.trimmingCharacters(in: .whitespacesAndNewlines),
                     voice: voice,
                     engine: effectiveEngine,
-                    sample: currentSample()
+                    sample: currentSample(),
+                    params: SynthParams(speed: speed, steps: steps, temperature: temperature)
                 )
                 cachedWav = u
                 cacheKey = key
@@ -816,6 +841,13 @@ struct ContentView: View {
 
                 Spacer()
             }
+
+            DisclosureGroup("Параметры синтеза") {
+                ParamsView(model: model)
+                    .padding(.top, 8)
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
         }
         .padding(20)
         .frame(minWidth: 600, minHeight: 420)
@@ -1092,10 +1124,95 @@ struct AddSampleSheet: View {
     }
 }
 
+struct ParamsView: View {
+    @ObservedObject var model: AppModel
+
+    private var eng: Engine { model.effectiveEngine }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Speed — supported by everyone
+            sliderRow(
+                label: "Скорость",
+                value: $model.speed,
+                range: 0.5...1.5, step: 0.05,
+                fmt: { String(format: "%.2f×", $0) },
+                onReset: { model.speed = 1.0 },
+                hint: "Темп речи. Универсально для всех движков."
+            )
+
+            // Steps — Supertonic / F5 diffusion
+            if eng == .supertonic || eng == .auto || eng == .f5 {
+                sliderRow(
+                    label: "Качество (шаги)",
+                    value: Binding(get: { Double(model.steps) }, set: { model.steps = Int($0.rounded()) }),
+                    range: 4...16, step: 1,
+                    fmt: { "\(Int($0.rounded()))" },
+                    onReset: { model.steps = 8 },
+                    hint: "Больше = чище, медленнее. Для Supertonic / F5."
+                )
+            }
+
+            // Temperature — XTTS only
+            if eng == .xtts {
+                sliderRow(
+                    label: "Temperature",
+                    value: $model.temperature,
+                    range: 0.3...1.0, step: 0.05,
+                    fmt: { String(format: "%.2f", $0) },
+                    onReset: { model.temperature = 0.65 },
+                    hint: "Ниже = детерминированнее, выше = разнообразнее. XTTS."
+                )
+            }
+
+            HStack {
+                Spacer()
+                Button("Сбросить всё") {
+                    model.speed = 1.0
+                    model.steps = 8
+                    model.temperature = 0.65
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 8)
+    }
+
+    @ViewBuilder
+    private func sliderRow(label: String, value: Binding<Double>,
+                           range: ClosedRange<Double>, step: Double,
+                           fmt: @escaping (Double) -> String,
+                           onReset: @escaping () -> Void,
+                           hint: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Text(label).frame(width: 130, alignment: .leading)
+                    .font(.system(size: 12))
+                Slider(value: value, in: range, step: step) { _ in
+                    model.invalidateCache()
+                }
+                Text(fmt(value.wrappedValue))
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 50, alignment: .trailing)
+                Button(action: { onReset(); model.invalidateCache() }) {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
+                .help("Сбросить к дефолту")
+            }
+            Text(hint).font(.system(size: 10)).foregroundStyle(.tertiary)
+                .padding(.leading, 138)
+        }
+    }
+}
+
 struct HelpView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                // Whole help is selectable — user can copy any line.
                 Text("Как управлять синтезом")
                     .font(.system(size: 15, weight: .semibold))
 
@@ -1188,11 +1305,11 @@ struct HelpView: View {
                         ("паузы", "Запятая короткая, точка длиннее, «…» (символ многоточия) — ещё длиннее, перевод строки — самая длинная."),
                         ("?", "Вопросительная интонация — модель её слышит."),
                         ("!", "Восклицание — реальная эмоция."),
-                        ("ё vs е", "Используй «ё» где должно быть «ё» (не «е»). XTTS их различает: «всё» vs «все»."),
-                        ("эмфаза слова", "Заглавные буквы выделяют слово: «это НАСТОЯЩИЙ голос»."),
-                        ("ударение слога", "Прямого синтаксиса нет. Если модель ставит неверно — перепиши слово фонетически или раздели короткими предложениями."),
+                        ("ё vs е", "Используй «ё» где должно быть «ё». XTTS их различает: «всё» vs «все»."),
+                        ("эмфаза слова", "Заглавные выделяют: «это НАСТОЯЩИЙ голос»."),
+                        ("ударение", "Управления нет — проверено на «синтез». Ни +син+тез, ни СИНТЕЗ, ни синнтез, ни сы́нтэз ударение не сдвигают. Решение — заменить слово: «синтез» → «озвучка», «генерация»."),
                     ],
-                    footer: "XTTS не поддерживает SSML, акут (а́), плюс-ударение Silero (с+интез). Только пунктуация и регистр букв."
+                    footer: "XTTS не поддерживает SSML, акут, плюс-ударение Silero. Если ударение критично — переключайся на Silero для этой фразы."
                 )
 
                 Text("Подсказка по горячим клавишам: ⌘↩ — Play / Стоп, ⌘E — экспорт WAV")
@@ -1202,8 +1319,9 @@ struct HelpView: View {
             }
             .padding(16)
             .frame(width: 460, alignment: .leading)
+            .textSelection(.enabled)
         }
-        .frame(width: 460, height: 520)
+        .frame(width: 460, height: 600)
     }
 
     @ViewBuilder
