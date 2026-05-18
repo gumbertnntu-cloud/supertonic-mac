@@ -16,7 +16,7 @@ from pathlib import Path
 
 TARGET_DIR = Path(os.path.expanduser("~/.cache/local-f5-misha-ru"))
 RU_REPO = "Misha24-10/F5-TTS_RUSSIAN"
-RU_CKPT = "F5TTS_v1_Base_v2/model_last_inference.safetensors"
+RU_CKPT = "F5TTS_v1_Base_accent_tune/model_last_inference.safetensors"
 RU_VOCAB = "F5TTS_v1_Base/vocab.txt"
 
 
